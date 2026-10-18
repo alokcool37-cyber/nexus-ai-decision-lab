@@ -1,4 +1,3 @@
-
 import zipfile
 from pathlib import Path
 
@@ -43,7 +42,8 @@ def load_data():
             "GitHub repository: " + ", ".join(missing_files)
         )
 
-    # Load sales data from the ZIP file
+    # Load sales data from the ZIP file.
+    # IMPORTANT: Keep InvoiceNo as text to avoid mixed-type parsing.
     with zipfile.ZipFile("nexus_ai_sales_data.zip", "r") as archive:
         csv_files = [
             name for name in archive.namelist()
@@ -57,27 +57,47 @@ def load_data():
             )
 
         with archive.open(csv_files[0]) as file:
-            sales = pd.read_csv(file)
+            sales = pd.read_csv(
+                file,
+                dtype={"InvoiceNo": "string"},
+                low_memory=False,
+            )
 
     monthly = pd.read_csv("nexus_ai_monthly_sales.csv")
     segment_summary = pd.read_csv("nexus_ai_segment_summary.csv")
     customers = pd.read_csv("nexus_ai_customer_segments.csv")
 
-    # Check that the expected columns exist
+    # Check that the expected columns exist.
     required_sales_columns = {
-        "InvoiceNo", "InvoiceDate", "Quantity",
-        "UnitPrice", "CustomerID", "LineValue",
+        "InvoiceNo",
+        "InvoiceDate",
+        "Quantity",
+        "UnitPrice",
+        "CustomerID",
+        "LineValue",
     }
+
     required_customer_columns = {
-        "CustomerID", "Segment", "Recency",
-        "Frequency", "Monetary", "LastPurchaseDate",
+        "CustomerID",
+        "Segment",
+        "Recency",
+        "Frequency",
+        "Monetary",
+        "LastPurchaseDate",
     }
-    required_monthly_columns = {"YearMonth", "SalesValue"}
+
+    required_monthly_columns = {
+        "YearMonth",
+        "SalesValue",
+    }
 
     if not required_sales_columns.issubset(sales.columns):
-        missing = sorted(required_sales_columns - set(sales.columns))
+        missing = sorted(
+            required_sales_columns - set(sales.columns)
+        )
         raise ValueError(
-            "Sales CSV is missing these columns: " + ", ".join(missing)
+            "Sales CSV is missing these columns: "
+            + ", ".join(missing)
         )
 
     if not required_customer_columns.issubset(customers.columns):
@@ -98,35 +118,69 @@ def load_data():
             + ", ".join(missing)
         )
 
-    # Convert columns to appropriate data types
+    # Normalize invoice numbers consistently.
+    # This removes accidental whitespace and preserves invoice IDs
+    # as text, so the distinct invoice count is calculated correctly.
+    sales["InvoiceNo"] = (
+        sales["InvoiceNo"]
+        .astype("string")
+        .str.strip()
+    )
+
+    sales["InvoiceNo"] = sales["InvoiceNo"].replace("", pd.NA)
+
+    # Convert sales columns to appropriate data types.
     sales["InvoiceDate"] = pd.to_datetime(
-        sales["InvoiceDate"], errors="coerce"
+        sales["InvoiceDate"],
+        errors="coerce",
     )
+
     sales["LineValue"] = pd.to_numeric(
-        sales["LineValue"], errors="coerce"
+        sales["LineValue"],
+        errors="coerce",
     )
+
     sales["Quantity"] = pd.to_numeric(
-        sales["Quantity"], errors="coerce"
+        sales["Quantity"],
+        errors="coerce",
     )
+
     sales["UnitPrice"] = pd.to_numeric(
-        sales["UnitPrice"], errors="coerce"
+        sales["UnitPrice"],
+        errors="coerce",
     )
 
+    # Prepare monthly sales data.
     monthly["YearMonth"] = monthly["YearMonth"].astype(str)
+
     monthly["SalesValue"] = pd.to_numeric(
-        monthly["SalesValue"], errors="coerce"
+        monthly["SalesValue"],
+        errors="coerce",
     )
 
-    customers["CustomerID"] = customers["CustomerID"].astype(str)
+    # Prepare customer segmentation data.
+    customers["CustomerID"] = (
+        customers["CustomerID"]
+        .astype("string")
+        .str.strip()
+    )
+
+    customers["CustomerID"] = customers["CustomerID"].replace(
+        "",
+        pd.NA,
+    )
+
     customers["Segment"] = customers["Segment"].astype(str)
 
     for column in ["Recency", "Frequency", "Monetary"]:
         customers[column] = pd.to_numeric(
-            customers[column], errors="coerce"
+            customers[column],
+            errors="coerce",
         )
 
     customers["LastPurchaseDate"] = pd.to_datetime(
-        customers["LastPurchaseDate"], errors="coerce"
+        customers["LastPurchaseDate"],
+        errors="coerce",
     )
 
     return sales, monthly, segment_summary, customers
@@ -138,12 +192,15 @@ def load_data():
 
 try:
     sales, monthly, segment_summary, customers = load_data()
+
 except Exception as error:
     st.error("NEXUS AI could not load the project data.")
+
     st.markdown(
         "Check that all four data files are uploaded to the same "
         "GitHub repository as `app.py`."
     )
+
     st.code(str(error))
     st.stop()
 
@@ -203,30 +260,37 @@ if not sales_dates.empty:
         max_value=max_date,
     )
 
-    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
+    if (
+        isinstance(date_range, (tuple, list))
+        and len(date_range) == 2
+    ):
         start_date, end_date = date_range
     else:
         start_date, end_date = min_date, max_date
+
 else:
     start_date, end_date = None, None
 
 
-# Filter customer data
+# Filter customer data by selected segments.
 filtered_customers = customers[
     customers["Segment"].isin(selected_segments)
 ].copy()
 
-# Filter sales data by selected dates
+
+# Filter sales data by selected dates.
 filtered_sales = sales.copy()
 
 if start_date is not None and end_date is not None:
     filtered_sales = filtered_sales[
         filtered_sales["InvoiceDate"].dt.date.between(
-            start_date, end_date
+            start_date,
+            end_date,
         )
     ]
 
-# Filter monthly sales using the selected date range
+
+# Filter monthly sales using the selected date range.
 filtered_monthly = monthly.copy()
 
 if start_date is not None and end_date is not None:
@@ -252,20 +316,32 @@ st.header("1. Business overview")
 
 total_sales = filtered_sales["LineValue"].sum()
 
-total_invoices = filtered_sales["InvoiceNo"].nunique()
-
-identified_customers = filtered_sales["CustomerID"].nunique()
-
-average_invoice_value = (
-    total_sales / total_invoices if total_invoices else 0
+# Count unique, non-missing invoice IDs.
+# InvoiceNo is normalized as text in load_data().
+total_invoices = filtered_sales["InvoiceNo"].nunique(
+    dropna=True
 )
 
-missing_customer_rows = filtered_sales["CustomerID"].isna().sum()
+identified_customers = filtered_sales["CustomerID"].nunique(
+    dropna=True
+)
+
+average_invoice_value = (
+    total_sales / total_invoices
+    if total_invoices
+    else 0
+)
+
+missing_customer_rows = (
+    filtered_sales["CustomerID"].isna().sum()
+)
+
 total_sales_rows = len(filtered_sales)
 
 missing_customer_pct = (
     missing_customer_rows / total_sales_rows * 100
-    if total_sales_rows else 0
+    if total_sales_rows
+    else 0
 )
 
 kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -334,8 +410,12 @@ with left_chart:
             fig_monthly,
             use_container_width=True,
         )
+
     else:
-        st.info("No monthly sales data is available for this date range.")
+        st.info(
+            "No monthly sales data is available for this date range."
+        )
+
 
 with right_chart:
     st.subheader("Transaction activity")
@@ -371,8 +451,12 @@ with right_chart:
             fig_activity,
             use_container_width=True,
         )
+
     else:
-        st.info("No transaction activity is available for this date range.")
+        st.info(
+            "No transaction activity is available for this date range."
+        )
+
 
 st.subheader("Sales data quality")
 
@@ -430,7 +514,9 @@ if not filtered_customers.empty:
             title="Customers by segment",
         )
 
-        fig_segments.update_layout(showlegend=False)
+        fig_segments.update_layout(
+            showlegend=False
+        )
 
         st.plotly_chart(
             fig_segments,
@@ -471,12 +557,15 @@ if not filtered_customers.empty:
         },
     )
 
-    fig_rfm.update_layout(showlegend=False)
+    fig_rfm.update_layout(
+        showlegend=False
+    )
 
     st.plotly_chart(
         fig_rfm,
         use_container_width=True,
     )
+
 else:
     st.warning(
         "No customers match the selected segment filters."
@@ -521,7 +610,9 @@ columns_to_show = [
     "LastPurchaseDate",
 ]
 
-st.caption(f"Matching customers: {len(table_data):,}")
+st.caption(
+    f"Matching customers: {len(table_data):,}"
+)
 
 st.dataframe(
     table_data[columns_to_show],
@@ -602,7 +693,9 @@ st.divider()
 
 st.header("6. Methodology and project notes")
 
-with st.expander("View data preparation and analytical approach"):
+with st.expander(
+    "View data preparation and analytical approach"
+):
     st.markdown(
         """
         **Data preparation**
