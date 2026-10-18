@@ -1,0 +1,3 @@
+Segment,Customers,MedianRecencyDays,MedianInvoices,MedianMonetary
+"Less recently active, lower-value",2670,96.0,1.0,362.01
+"More engaged, higher-value",1668,17.0,6.0,2058.17
